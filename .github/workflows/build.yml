@@ -40,7 +40,6 @@ jobs:
           chmod +x ./magiskboot
           rm -rf magisk.apk lib
           
-          # Otomatis cek apakah di-upload sebagai .img, .zip, atau ditaruh di Releases v1.0
           if [ -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
             cp "$GITHUB_WORKSPACE/vendor_boot.img" .
           elif [ -f "$GITHUB_WORKSPACE/vendor_boot.zip" ]; then
@@ -50,17 +49,17 @@ jobs:
           fi
           
           ./magiskboot unpack -h vendor_boot.img
+          echo "=== Files after magiskboot unpack ==="
+          find . -maxdepth 3 -ls
           
           mkdir -p ramdisk_extracted
-          cd ramdisk_extracted
-          if [ -f ../ramdisk.cpio ]; then
-            ../magiskboot cpio ../ramdisk.cpio extract || cpio -idmv < ../ramdisk.cpio
-          elif [ -f ../ramdisk0.cpio ]; then
-            ../magiskboot cpio ../ramdisk0.cpio extract || cpio -idmv < ../ramdisk0.cpio
-          fi
+          for cpio_file in $(find . -maxdepth 3 -name "*.cpio"); do
+            echo "Extracting $cpio_file ..."
+            (cd ramdisk_extracted && cpio -idmu < "$GITHUB_WORKSPACE/vb_work/$cpio_file" 2>/dev/null) || ./magiskboot cpio "$cpio_file" extract
+          done
           
           echo "=== Extracted Modules inside vendor_boot ==="
-          find . -name "*.ko" -o -name "*.load*" -o -name "fstab*"
+          find ramdisk_extracted -name "*.ko" -o -name "*.load*" -o -name "fstab*"
 
       - name: Sync Minimal TWRP 12.1 Manifest
         run: |
@@ -75,6 +74,7 @@ jobs:
         run: |
           DEV_PATH="$GITHUB_WORKSPACE/twrp/device/generic/mt6765_rec"
           mkdir -p "$DEV_PATH/recovery/root/system/etc"
+          mkdir -p "$DEV_PATH/recovery/root/system/bin"
           mkdir -p "$DEV_PATH/recovery/root/vendor/lib/modules"
           mkdir -p "$DEV_PATH/prebuilt"
 
@@ -130,9 +130,9 @@ jobs:
           AB_OTA_PARTITIONS += boot vendor_boot system system_ext vendor product
           BOARD_SUPPRESS_SECURE_ERASE := true
 
-          BOARD_SUPER_PARTITION_SIZE := 9126805504
+          BOARD_SUPER_PARTITION_SIZE := 5368709120
           BOARD_SUPER_PARTITION_GROUPS := main_dynamic_partitions
-          BOARD_MAIN_DYNAMIC_PARTITIONS_SIZE := 9122611200
+          BOARD_MAIN_DYNAMIC_PARTITIONS_SIZE := 5364514816
           BOARD_MAIN_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext vendor product
 
           TARGET_USERIMAGES_USE_EXT4 := true
@@ -223,21 +223,14 @@ jobs:
           cd "$GITHUB_WORKSPACE/twrp"
           source build/envsetup.sh
           lunch twrp_mt6765_rec-eng
-          mka -j$(nproc --all) ramdisk-recovery.cpio || mka -j$(nproc --all) recoveryimage || mka -j$(nproc --all) vendorbootimage
+          mka -j$(nproc --all) recoveryimage || mka -j$(nproc --all) vendorbootimage
 
       - name: Inject Recovery into Stock Vendor Boot
         run: |
           cd "$GITHUB_WORKSPACE/vb_work"
           OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
-          
-          # Cari ramdisk hasil build TWRP
           TWRP_ROOT="$OUT_DIR/recovery/root"
-          if [ ! -d "$TWRP_ROOT" ]; then
-            echo "Error: TWRP root directory not found!"
-            exit 1
-          fi
 
-          # Salin first_stage_ramdisk dan lib/modules asli dari vendor_boot bawaan agar Android normal tetap bisa booting!
           if [ -d "ramdisk_extracted/first_stage_ramdisk" ]; then
             cp -rf ramdisk_extracted/first_stage_ramdisk "$TWRP_ROOT/"
           fi
@@ -247,19 +240,23 @@ jobs:
             rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko"
           fi
 
-          # Kemas ulang menjadi ramdisk.cpio baru
+          ORIG_CPIO=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
+          echo "Target CPIO to replace: $ORIG_CPIO"
+
           cd "$TWRP_ROOT"
           find . | cpio -o -H newc > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
           cd "$GITHUB_WORKSPACE/vb_work"
 
-          if [ -f ramdisk.cpio ]; then
+          if [ -n "$ORIG_CPIO" ]; then
+            mv -f new_ramdisk.cpio "$ORIG_CPIO"
+          else
             mv -f new_ramdisk.cpio ramdisk.cpio
-          elif [ -f ramdisk0.cpio ]; then
-            mv -f new_ramdisk.cpio ramdisk0.cpio
           fi
 
           ./magiskboot repack vendor_boot.img new-vendor_boot.img
+          truncate -s 67108864 new-vendor_boot.img
           mv new-vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+          ls -lh "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
 
       - name: Upload Output
         uses: actions/upload-artifact@v4
