@@ -1,0 +1,269 @@
+name: CI Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      fps:
+        description: 'GUI Framerate'
+        required: true
+        default: '30'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space & Setup Swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo fallocate -l 16G /swapfile_twrp
+          sudo chmod 600 /swapfile_twrp
+          sudo mkswap /swapfile_twrp
+          sudo swapon /swapfile_twrp
+          sudo apt-get update
+          sudo apt-get install -y git repo bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib gnupg gperf imagemagick lib32ncurses5-dev \
+            lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 cpio lz4 xz-utils
+
+      - name: Extract Vendor Boot & Inspect Modules
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/vb_work"
+          cd "$GITHUB_WORKSPACE/vb_work"
+          
+          curl -Lo magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk
+          unzip -q magisk.apk "lib/x86_64/libmagiskboot.so"
+          mv lib/x86_64/libmagiskboot.so ./magiskboot
+          chmod +x ./magiskboot
+          rm -rf magisk.apk lib
+          
+          # Otomatis cek apakah di-upload sebagai .img, .zip, atau ditaruh di Releases v1.0
+          if [ -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
+            cp "$GITHUB_WORKSPACE/vendor_boot.img" .
+          elif [ -f "$GITHUB_WORKSPACE/vendor_boot.zip" ]; then
+            unzip -q "$GITHUB_WORKSPACE/vendor_boot.zip" -d .
+          else
+            curl -L -o vendor_boot.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot.img"
+          fi
+          
+          ./magiskboot unpack -h vendor_boot.img
+          
+          mkdir -p ramdisk_extracted
+          cd ramdisk_extracted
+          if [ -f ../ramdisk.cpio ]; then
+            ../magiskboot cpio ../ramdisk.cpio extract || cpio -idmv < ../ramdisk.cpio
+          elif [ -f ../ramdisk0.cpio ]; then
+            ../magiskboot cpio ../ramdisk0.cpio extract || cpio -idmv < ../ramdisk0.cpio
+          fi
+          
+          echo "=== Extracted Modules inside vendor_boot ==="
+          find . -name "*.ko" -o -name "*.load*" -o -name "fstab*"
+
+      - name: Sync Minimal TWRP 12.1 Manifest
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/twrp"
+          cd "$GITHUB_WORKSPACE/twrp"
+          git config --global user.name "builder"
+          git config --global user.email "builder@localhost"
+          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+      - name: Generate Device Tree
+        run: |
+          DEV_PATH="$GITHUB_WORKSPACE/twrp/device/generic/mt6765_rec"
+          mkdir -p "$DEV_PATH/recovery/root/system/etc"
+          mkdir -p "$DEV_PATH/recovery/root/vendor/lib/modules"
+          mkdir -p "$DEV_PATH/prebuilt"
+
+          cp "$GITHUB_WORKSPACE/vb_work/dtb" "$DEV_PATH/prebuilt/dtb.img" || touch "$DEV_PATH/prebuilt/dtb.img"
+          
+          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* "$DEV_PATH/recovery/root/vendor/lib/modules/" || true
+          fi
+          find "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted" -name "*.ko" -exec cp -f {} "$DEV_PATH/recovery/root/vendor/lib/modules/" \; || true
+          rm -f "$DEV_PATH/recovery/root/vendor/lib/modules/tran_fp.ko"
+
+          cat << 'EOF' > "$DEV_PATH/AndroidProducts.mk"
+          PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_mt6765_rec.mk
+          COMMON_LUNCH_CHOICES := twrp_mt6765_rec-eng
+          EOF
+
+          cat << 'EOF' > "$DEV_PATH/twrp_mt6765_rec.mk"
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_minimal.mk)
+          $(call inherit-product, vendor/twrp/config/common.mk)
+
+          PRODUCT_NAME := twrp_mt6765_rec
+          PRODUCT_DEVICE := mt6765_rec
+          PRODUCT_BRAND := generic
+          PRODUCT_MODEL := Generic MT6765
+          PRODUCT_MANUFACTURER := generic
+          PRODUCT_COPY_FILES += $(call find-copy-subdir-files,*,device/generic/mt6765_rec/recovery/root,recovery/root)
+          EOF
+
+          cat << EOF > "$DEV_PATH/BoardConfig.mk"
+          DEVICE_PATH := device/generic/mt6765_rec
+          ALLOW_MISSING_DEPENDENCIES := true
+
+          TARGET_ARCH := arm
+          TARGET_ARCH_VARIANT := armv8-a
+          TARGET_CPU_ABI := armeabi-v7a
+          TARGET_CPU_ABI2 := armeabi
+          TARGET_CPU_VARIANT := cortex-a53
+          TARGET_USES_64_BIT_BINDER := true
+
+          TARGET_NO_BOOTLOADER := true
+          TARGET_NO_KERNEL := true
+          BOARD_BOOT_HEADER_VERSION := 4
+          BOARD_MKBOOTIMG_ARGS += --header_version 4
+
+          BOARD_FLASH_BLOCK_SIZE := 131072
+          BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := 67108864
+          BOARD_USES_GENERIC_KERNEL_IMAGE := true
+          BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT := true
+          BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT := true
+
+          AB_OTA_UPDATER := true
+          AB_OTA_PARTITIONS += boot vendor_boot system system_ext vendor product
+          BOARD_SUPPRESS_SECURE_ERASE := true
+
+          BOARD_SUPER_PARTITION_SIZE := 9126805504
+          BOARD_SUPER_PARTITION_GROUPS := main_dynamic_partitions
+          BOARD_MAIN_DYNAMIC_PARTITIONS_SIZE := 9122611200
+          BOARD_MAIN_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext vendor product
+
+          TARGET_USERIMAGES_USE_EXT4 := true
+          TARGET_USERIMAGES_USE_F2FS := true
+          BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := f2fs
+
+          TW_THEME := portrait_hdpi
+          TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
+          TARGET_SCREEN_WIDTH := 720
+          TARGET_SCREEN_HEIGHT := 1600
+          TW_FRAMERATE := ${{ github.event.inputs.fps }}
+          TW_BRIGHTNESS_PATH := "/sys/class/leds/lcd-backlight/brightness"
+          TW_MAX_BRIGHTNESS := 2047
+          TW_DEFAULT_BRIGHTNESS := 1024
+          TW_INCLUDE_NTFS_3G := true
+          TW_USE_TOOLBOX := true
+          TW_EXCLUDE_DEFAULT_USB_INIT := true
+          TW_INCLUDE_REPACKTOOLS := true
+          TW_HAS_MTP := true
+          EOF
+
+          cat << 'EOF' > "$DEV_PATH/recovery/root/system/etc/recovery.fstab"
+          /system          erofs     system                                     flags=display="System";logical;slotselect
+          /system          ext4      system                                     flags=display="System (EXT4)";logical;slotselect
+          /system_ext      erofs     system_ext                                 flags=display="System_Ext";logical;slotselect
+          /system_ext      ext4      system_ext                                 flags=display="System_Ext (EXT4)";logical;slotselect
+          /vendor          erofs     vendor                                     flags=display="Vendor";logical;slotselect
+          /vendor          ext4      vendor                                     flags=display="Vendor (EXT4)";logical;slotselect
+          /product         erofs     product                                    flags=display="Product";logical;slotselect
+          /product         ext4      product                                    flags=display="Product (EXT4)";logical;slotselect
+
+          /metadata        ext4      /dev/block/by-name/md_udc                  flags=display="Metadata";wipeingui;formattable
+          /data            f2fs      /dev/block/by-name/userdata                flags=display="Data";wipeingui;formattable;fileencryption=aes-256-xts:aes-256-cts:v2
+          /tranfs          ext4      /dev/block/by-name/tranfs                  flags=display="Tranfs";wipeingui
+          /persist         ext4      /dev/block/by-name/persist                 flags=display="Persist";backup=1
+          /nvram           emmc      /dev/block/by-name/nvram                   flags=display="NVRAM";backup=1;flashimg=1
+          /nvdata          ext4      /dev/block/by-name/nvdata                  flags=display="NVData";backup=1
+          /nvcfg           ext4      /dev/block/by-name/nvcfg                   flags=display="NVCfg";backup=1
+          /boot            emmc      /dev/block/by-name/boot                    flags=display="Boot";slotselect;backup=1;flashimg=1
+          /vendor_boot     emmc      /dev/block/by-name/vendor_boot             flags=display="Vendor_Boot";slotselect;backup=1;flashimg=1
+          /dtbo            emmc      /dev/block/by-name/dtbo                    flags=display="DTBO";slotselect;backup=1;flashimg=1
+          /vbmeta          emmc      /dev/block/by-name/vbmeta                  flags=display="VBMeta";backup=1;flashimg=1
+          /vbmeta_system   emmc      /dev/block/by-name/vbmeta_system           flags=display="VBMeta_System";slotselect;backup=1;flashimg=1
+          /vbmeta_vendor   emmc      /dev/block/by-name/vbmeta_vendor           flags=display="VBMeta_Vendor";slotselect;backup=1;flashimg=1
+          /misc            emmc      /dev/block/by-name/para                    flags=display="Misc"
+
+          /external_sd     auto      /dev/block/mmcblk1p1  /dev/block/mmcblk1   flags=display="MicroSD";storage;wipeingui;removable
+          /usb_otg         auto      /dev/block/sda1       /dev/block/sda       flags=display="USB-OTG";storage;wipeingui;removable
+          EOF
+
+          cat << 'EOF' > "$DEV_PATH/recovery/root/init.recovery.mt6765.rc"
+          on init
+              setprop sys.usb.configfs 1
+              setprop sys.usb.ffs.aio_compat 1
+              exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
+
+          on fs
+              wait /dev/block/platform/bootdevice
+              symlink /dev/block/platform/bootdevice /dev/block/bootdevice
+          EOF
+
+          cat << 'EOF' > "$DEV_PATH/recovery/root/system/bin/load_ts.sh"
+          #!/system/bin/sh
+          for mod_dir in /lib/modules /vendor/lib/modules /first_stage_ramdisk/lib/modules; do
+              if [ -d "$mod_dir" ]; then
+                  for m in i2c-mt65xx.ko spi-mt65xx.ko i2c_mt65xx.ko spi_mt65xx.ko \
+                           mtk_disp_notify.ko mtk-disp-notify.ko \
+                           mediatek_drm.ko mediatek-drm.ko \
+                           adaptive_ts.ko adaptive-ts.ko \
+                           focaltech_noflash_common.ko novatek_nt36xxx.ko; do
+                      [ -f "$mod_dir/$m" ] && insmod "$mod_dir/$m" 2>/dev/null
+                  done
+                  if [ -f "$mod_dir/modules.load" ]; then
+                      while read -r line; do
+                          case "$line" in
+                              *tran_fp*) continue ;;
+                              *.ko) insmod "$mod_dir/$line" 2>/dev/null ;;
+                          esac
+                      done < "$mod_dir/modules.load"
+                  fi
+              fi
+          done
+          EOF
+          chmod 755 "$DEV_PATH/recovery/root/system/bin/load_ts.sh"
+
+      - name: Compile Recovery Ramdisk
+        run: |
+          cd "$GITHUB_WORKSPACE/twrp"
+          source build/envsetup.sh
+          lunch twrp_mt6765_rec-eng
+          mka -j$(nproc --all) ramdisk-recovery.cpio || mka -j$(nproc --all) recoveryimage || mka -j$(nproc --all) vendorbootimage
+
+      - name: Inject Recovery into Stock Vendor Boot
+        run: |
+          cd "$GITHUB_WORKSPACE/vb_work"
+          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
+          
+          # Cari ramdisk hasil build TWRP
+          TWRP_ROOT="$OUT_DIR/recovery/root"
+          if [ ! -d "$TWRP_ROOT" ]; then
+            echo "Error: TWRP root directory not found!"
+            exit 1
+          fi
+
+          # Salin first_stage_ramdisk dan lib/modules asli dari vendor_boot bawaan agar Android normal tetap bisa booting!
+          if [ -d "ramdisk_extracted/first_stage_ramdisk" ]; then
+            cp -rf ramdisk_extracted/first_stage_ramdisk "$TWRP_ROOT/"
+          fi
+          if [ -d "ramdisk_extracted/lib/modules" ]; then
+            mkdir -p "$TWRP_ROOT/lib/modules"
+            cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/lib/modules/"
+            rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko"
+          fi
+
+          # Kemas ulang menjadi ramdisk.cpio baru
+          cd "$TWRP_ROOT"
+          find . | cpio -o -H newc > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+          cd "$GITHUB_WORKSPACE/vb_work"
+
+          if [ -f ramdisk.cpio ]; then
+            mv -f new_ramdisk.cpio ramdisk.cpio
+          elif [ -f ramdisk0.cpio ]; then
+            mv -f new_ramdisk.cpio ramdisk0.cpio
+          fi
+
+          ./magiskboot repack vendor_boot.img new-vendor_boot.img
+          mv new-vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+
+      - name: Upload Output
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-package
+          path: |
+            vendor_boot-twrp.img
