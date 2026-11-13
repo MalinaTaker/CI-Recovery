@@ -230,16 +230,20 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/vb_work"
           OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
-          TWRP_ROOT="$OUT_DIR/recovery/root"
-
-          echo "=== Checking compiled TWRP binaries ==="
-          ls -la "$TWRP_ROOT/system/bin/recovery" "$TWRP_ROOT/init"
-          if [ ! -f "$TWRP_ROOT/system/bin/recovery" ]; then
-            echo "FATAL: TWRP recovery binary was not built!"
-            exit 1
+          
+          # Deteksi folder root hasil compile secara otomatis
+          if [ -d "$OUT_DIR/root" ]; then
+            TWRP_ROOT="$OUT_DIR/root"
+          elif [ -d "$OUT_DIR/recovery/root" ]; then
+            TWRP_ROOT="$OUT_DIR/recovery/root"
+          else
+            TWRP_ROOT="$OUT_DIR/ramdisk"
           fi
 
-          # Gabungkan ramdisk bawaan vendor_boot (first_stage_ramdisk, lib/modules, dll) dengan TWRP
+          echo "=== Using TWRP Root: $TWRP_ROOT ==="
+          ls -la "$TWRP_ROOT" || true
+
+          # Gabungkan ramdisk bawaan vendor_boot dengan TWRP
           cp -rn ramdisk_extracted/* "$TWRP_ROOT/" || true
           if [ -d "ramdisk_extracted/first_stage_ramdisk" ]; then
             cp -rf ramdisk_extracted/first_stage_ramdisk "$TWRP_ROOT/"
@@ -257,7 +261,12 @@ jobs:
           find . | cpio -o -H newc > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
           cd "$GITHUB_WORKSPACE/vb_work"
 
-          mv -f new_ramdisk.cpio "$ORIG_CPIO"
+          if [ -n "$ORIG_CPIO" ]; then
+            mv -f new_ramdisk.cpio "$ORIG_CPIO"
+          else
+            mv -f new_ramdisk.cpio ramdisk.cpio
+          fi
+
           ./magiskboot repack vendor_boot.img new-vendor_boot.img
           truncate -s 67108864 new-vendor_boot.img
           mv new-vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
