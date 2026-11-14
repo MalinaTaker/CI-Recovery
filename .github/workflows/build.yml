@@ -215,7 +215,13 @@ jobs:
           cd "$GITHUB_WORKSPACE/twrp"
           source build/envsetup.sh
           lunch twrp_mt6765_rec-eng
-          mka -j$(nproc --all) recoveryimage
+          if ! mka -j$(nproc --all) recoveryimage; then
+            echo "Fixing root/vendor symlink conflict and finishing packaging..."
+            OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
+            rm -f "$OUT_DIR/root/vendor"
+            mkdir -p "$OUT_DIR/root/vendor"
+            mka -j$(nproc --all) recoveryimage
+          fi
 
       - name: Inject Recovery into Stock Vendor Boot
         run: |
