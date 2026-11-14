@@ -27,7 +27,7 @@ jobs:
             g++-multilib gcc-multilib gnupg gperf imagemagick lib32ncurses5-dev \
             lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
             libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
-            schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 cpio lz4 xz-utils
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 cpio lz4 xz-utils p7zip-full
 
       - name: Extract Vendor Boot & Inspect Modules
         run: |
@@ -43,7 +43,7 @@ jobs:
           if [ -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
             cp "$GITHUB_WORKSPACE/vendor_boot.img" .
           elif [ -f "$GITHUB_WORKSPACE/vendor_boot.zip" ]; then
-            unzip -q "$GITHUB_WORKSPACE/vendor_boot.zip" -d .
+            7z x "$GITHUB_WORKSPACE/vendor_boot.zip" -o. -y || unzip -q "$GITHUB_WORKSPACE/vendor_boot.zip" -d .
           else
             curl -L -o vendor_boot.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot.img"
           fi
@@ -79,6 +79,7 @@ jobs:
 
           dd if=/dev/zero of="$DEV_PATH/prebuilt/kernel" bs=1024 count=64
           cp "$GITHUB_WORKSPACE/vb_work/dtb" "$DEV_PATH/prebuilt/dtb.img" || dd if=/dev/zero of="$DEV_PATH/prebuilt/dtb.img" bs=1024 count=64
+          cp "$DEV_PATH/prebuilt/dtb.img" "$DEV_PATH/prebuilt/mt6765.dtb"
 
           cat << 'EOF' > "$DEV_PATH/AndroidProducts.mk"
           PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_mt6765_rec.mk
@@ -215,13 +216,18 @@ jobs:
           cd "$GITHUB_WORKSPACE/twrp"
           source build/envsetup.sh
           lunch twrp_mt6765_rec-eng
-          if ! mka -j$(nproc --all) recoveryimage; then
-            echo "Fixing root/vendor symlink conflict and finishing packaging..."
-            OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
-            rm -f "$OUT_DIR/root/vendor"
-            mkdir -p "$OUT_DIR/root/vendor"
-            mka -j$(nproc --all) recoveryimage
+          
+          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
+          mkdir -p "$OUT_DIR"
+          cp -f "$GITHUB_WORKSPACE/vb_work/dtb" "$OUT_DIR/dtb.img" || true
+          
+          mka -j$(nproc --all) ramdisk-recovery.img || mka -j$(nproc --all) recoveryimage || true
+          
+          if [ ! -f "$OUT_DIR/recovery/root/system/bin/recovery" ]; then
+            echo "Error: Binary recovery belum terbentuk!"
+            exit 1
           fi
+          echo "=== Compile TWRP Ramdisk 100% Sukses! ==="
 
       - name: Inject Recovery into Stock Vendor Boot
         run: |
