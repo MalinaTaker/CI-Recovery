@@ -75,18 +75,10 @@ jobs:
           DEV_PATH="$GITHUB_WORKSPACE/twrp/device/generic/mt6765_rec"
           mkdir -p "$DEV_PATH/recovery/root/system/etc"
           mkdir -p "$DEV_PATH/recovery/root/system/bin"
-          mkdir -p "$DEV_PATH/recovery/root/vendor/lib/modules"
           mkdir -p "$DEV_PATH/prebuilt"
 
-          # Buat dummy kernel agar AOSP Makefile wajib mengaktifkan target penuh recoveryimage
           dd if=/dev/zero of="$DEV_PATH/prebuilt/kernel" bs=1024 count=64
           cp "$GITHUB_WORKSPACE/vb_work/dtb" "$DEV_PATH/prebuilt/dtb.img" || dd if=/dev/zero of="$DEV_PATH/prebuilt/dtb.img" bs=1024 count=64
-          
-          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
-            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* "$DEV_PATH/recovery/root/vendor/lib/modules/" || true
-          fi
-          find "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted" -name "*.ko" -exec cp -f {} "$DEV_PATH/recovery/root/vendor/lib/modules/" \; || true
-          rm -f "$DEV_PATH/recovery/root/vendor/lib/modules/tran_fp.ko"
 
           cat << 'EOF' > "$DEV_PATH/AndroidProducts.mk"
           PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_mt6765_rec.mk
@@ -109,6 +101,7 @@ jobs:
           cat << EOF > "$DEV_PATH/BoardConfig.mk"
           DEVICE_PATH := device/generic/mt6765_rec
           ALLOW_MISSING_DEPENDENCIES := true
+          BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
 
           TARGET_ARCH := arm
           TARGET_ARCH_VARIANT := armv8-a
@@ -239,9 +232,10 @@ jobs:
             cp -rf ramdisk_extracted/first_stage_ramdisk "$TWRP_ROOT/"
           fi
           if [ -d "ramdisk_extracted/lib/modules" ]; then
-            mkdir -p "$TWRP_ROOT/lib/modules"
+            mkdir -p "$TWRP_ROOT/lib/modules" "$TWRP_ROOT/vendor/lib/modules"
             cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/lib/modules/"
-            rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko"
+            cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/vendor/lib/modules/"
+            rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko" "$TWRP_ROOT/vendor/lib/modules/tran_fp.ko"
           fi
 
           ORIG_CPIO=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
