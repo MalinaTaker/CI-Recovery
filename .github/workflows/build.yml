@@ -249,36 +249,56 @@ jobs:
           OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
           TWRP_ROOT="$OUT_DIR/recovery/root"
 
-          echo "=== Inspecting Stock Vendor Boot Ramdisk & Module Architecture ==="
-          ls -la ramdisk_extracted/
-          file ramdisk_extracted/lib/modules/*.ko | head -n 5
+          echo "=== 1. Cek Arsitektur Binary Asli di Stock vendor_boot.img X6532C ==="
+          file ramdisk_extracted/system/bin/* || true
+          echo "=== 2. Isi Asli init.recovery.mt6765.rc Bawaan Pabrik X6532C ==="
+          cat ramdisk_extracted/init.recovery.mt6765.rc || true
+          echo "=== 3. Isi Asli modules.load.recovery Bawaan Pabrik X6532C ==="
+          cat ramdisk_extracted/lib/modules/modules.load.recovery || true
 
-          echo "=== Verifying TWRP 64-bit Binaries ==="
-          file "$TWRP_ROOT/system/bin/recovery" "$TWRP_ROOT/system/bin/init"
-
-          # Salin first_stage_ramdisk dan modul asli dari vendor_boot bawaan ke dalam TWRP_ROOT
-          cp -rn ramdisk_extracted/* "$TWRP_ROOT/" || true
+          # JANGAN salin seluruh ramdisk_extracted/* karena akan merusak sepolicy & system TWRP!
+          # Cukup ambil first_stage_ramdisk dan lib/modules saja:
           if [ -d "ramdisk_extracted/first_stage_ramdisk" ]; then
+            rm -rf "$TWRP_ROOT/first_stage_ramdisk"
             cp -rf ramdisk_extracted/first_stage_ramdisk "$TWRP_ROOT/"
             cp -f ramdisk_extracted/first_stage_ramdisk/fstab* "$TWRP_ROOT/system/etc/" || true
           fi
+
           if [ -d "ramdisk_extracted/lib/modules" ]; then
             mkdir -p "$TWRP_ROOT/lib/modules" "$TWRP_ROOT/vendor/lib/modules" "$TWRP_ROOT/first_stage_ramdisk/lib/modules"
             cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/lib/modules/"
             cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/vendor/lib/modules/"
             cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/first_stage_ramdisk/lib/modules/"
-            rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko" "$TWRP_ROOT/vendor/lib/modules/tran_fp.ko" "$TWRP_ROOT/first_stage_ramdisk/lib/modules/tran_fp.ko"
+            rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko" \
+                  "$TWRP_ROOT/vendor/lib/modules/tran_fp.ko" \
+                  "$TWRP_ROOT/first_stage_ramdisk/lib/modules/tran_fp.ko"
           fi
 
-          # Pastikan symlink /init menunjuk ke /system/bin/init
+          # Gabungkan isi init.recovery.mt6765.rc bawaan pabrik dengan load_ts.sh kita
+          if [ -f "ramdisk_extracted/init.recovery.mt6765.rc" ]; then
+            cp -f ramdisk_extracted/init.recovery.mt6765.rc "$TWRP_ROOT/init.recovery.mt6765.rc"
+            cat << 'EOF' >> "$TWRP_ROOT/init.recovery.mt6765.rc"
+
+          on init
+              setprop sys.usb.configfs 1
+              setprop sys.usb.ffs.aio_compat 1
+              exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
+          EOF
+            chmod 750 "$TWRP_ROOT/init.recovery.mt6765.rc"
+          fi
+
           ln -sf /system/bin/init "$TWRP_ROOT/init"
 
           ORIG_CPIO=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
           echo "Target CPIO to replace: $ORIG_CPIO"
 
-          # Kemas ulang dengan UID 0 / GID 0 (root:root) wajib untuk Android GKI init!
+          # Gunakan cpio dari hasil build AOSP atau strip './' agar sama persis dengan struktur CPIO standar Android!
+          if [ -f "$OUT_DIR/ramdisk-recovery.img" ]; then
+            echo "Using clean TWRP ramdisk structure..."
+          fi
+
           cd "$TWRP_ROOT"
-          find . ! -name "." | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
           cd "$GITHUB_WORKSPACE/vb_work"
 
           mv -f new_ramdisk.cpio "$ORIG_CPIO"
