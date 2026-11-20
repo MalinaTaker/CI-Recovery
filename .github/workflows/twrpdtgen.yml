@@ -97,8 +97,11 @@ jobs:
             sed -i '1i $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)' twrp_x6532c.mk
           fi
 
-          # 3. Pastikan prebuilt dtb tersedia dalam format .dtb dan .img
+          # 3. Buat dummy kernel & pastikan prebuilt dtb tersedia
           mkdir -p prebuilt
+          if [ ! -f "prebuilt/kernel" ]; then
+            dd if=/dev/zero of=prebuilt/kernel bs=1024 count=64
+          fi
           cp -f "$GITHUB_WORKSPACE/vb_work/dtb" prebuilt/dtb.img 2>/dev/null || true
           cp -f prebuilt/dtb.img prebuilt/mt6765.dtb 2>/dev/null || true
 
