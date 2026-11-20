@@ -176,7 +176,12 @@ jobs:
           mkdir -p "$OUT_DIR"
           cp -f "$GITHUB_WORKSPACE/vb_work/dtb" "$OUT_DIR/dtb.img" || true
 
-          mka -j$(nproc --all) vendorbootimage || mka -j$(nproc --all) ramdisk-recovery.img || mka -j$(nproc --all) recoveryimage || true
+          # Build recoveryimage dulu; jika kosong (recovery-as-boot), lanjut ke bootimage
+          mka -j$(nproc --all) recoveryimage || true
+          if [ ! -f "$OUT_DIR/recovery/root/system/bin/recovery" ]; then
+            echo "Target recoveryimage kosong, beralih ke bootimage..."
+            mka -j$(nproc --all) bootimage || true
+          fi
 
           if [ ! -f "$OUT_DIR/recovery/root/system/bin/recovery" ]; then
             echo "Error: Binary recovery belum terbentuk!"
