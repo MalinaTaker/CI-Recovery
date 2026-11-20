@@ -1,0 +1,41 @@
+name: Test Magiskboot Repack
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-repack:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Unpack & Repack Stock Vendor Boot
+        run: |
+          sudo apt-get update && sudo apt-get install -y p7zip-full unzip curl
+          mkdir -p "$GITHUB_WORKSPACE/vb_test"
+          cd "$GITHUB_WORKSPACE/vb_test"
+
+          curl -Lo magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk
+          unzip -q magisk.apk "lib/x86_64/libmagiskboot.so"
+          mv lib/x86_64/libmagiskboot.so ./magiskboot
+          chmod +x ./magiskboot
+          rm -rf magisk.apk lib
+
+          if [ -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
+            cp "$GITHUB_WORKSPACE/vendor_boot.img" .
+          elif [ -f "$GITHUB_WORKSPACE/vendor_boot.zip" ]; then
+            7z x "$GITHUB_WORKSPACE/vendor_boot.zip" -o. -y || unzip -q "$GITHUB_WORKSPACE/vendor_boot.zip" -d .
+          else
+            curl -L -o vendor_boot.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot.img"
+          fi
+
+          ./magiskboot unpack -h vendor_boot.img
+          ./magiskboot repack vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-repack-test.img"
+          ls -lh "$GITHUB_WORKSPACE/vendor_boot-repack-test.img"
+
+      - name: Upload Test Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-boot-repack-test
+          path: vendor_boot-repack-test.img
