@@ -1,4 +1,4 @@
-name: TWRPDTGEN Recovery
+name: twrpdtgen
 
 on:
   workflow_dispatch:
@@ -76,18 +76,16 @@ jobs:
           echo "=== Isi Asli Device Tree ==="
           ls -la
 
-          # 1. Hapus vendorsetup.sh (usang di twrp-12.1) & rename omni_ ke twrp_
+          # 1. Hapus vendorsetup.sh & rename omni_ ke twrp_x6532c.mk (tanpa tanda hubung '-')
           rm -f vendorsetup.sh
-          if [ -f "omni_Infinix-X6532C.mk" ]; then
-            mv omni_Infinix-X6532C.mk twrp_x6532C.mk
-          fi
+          mv -f omni_Infinix-X6532C.mk twrp_x6532c.mk
 
-          # 2. Konversi referensi omni ke twrp-12.1
+          # 2. Tulis ulang AndroidProducts.mk & konversi referensi di twrp_x6532c.mk
           cat << 'EOF' > AndroidProducts.mk
           PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_x6532c.mk
           COMMON_LUNCH_CHOICES := twrp_x6532c-eng
           EOF
-          
+
           sed -i 's/omni_Infinix-X6532C/twrp_x6532c/g' twrp_x6532c.mk
           sed -i 's|vendor/omni/config/common.mk|vendor/twrp/config/common.mk|g' twrp_x6532c.mk
           sed -i 's/full_base_telephony.mk/base.mk/g' twrp_x6532c.mk
