@@ -249,59 +249,91 @@ jobs:
           OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
           TWRP_ROOT="$OUT_DIR/recovery/root"
 
-          echo "=== 1. Cek Arsitektur Binary Asli di Stock vendor_boot.img X6532C ==="
-          file ramdisk_extracted/system/bin/* || true
-          echo "=== 2. Isi Asli init.recovery.mt6765.rc Bawaan Pabrik X6532C ==="
-          cat ramdisk_extracted/init.recovery.mt6765.rc || true
-          echo "=== 3. Isi Asli modules.load.recovery Bawaan Pabrik X6532C ==="
-          cat ramdisk_extracted/lib/modules/modules.load.recovery || true
-
-          # JANGAN salin seluruh ramdisk_extracted/* karena akan merusak sepolicy & system TWRP!
-          # Cukup ambil first_stage_ramdisk dan lib/modules saja:
-          if [ -d "ramdisk_extracted/first_stage_ramdisk" ]; then
-            rm -rf "$TWRP_ROOT/first_stage_ramdisk"
-            cp -rf ramdisk_extracted/first_stage_ramdisk "$TWRP_ROOT/"
-            cp -f ramdisk_extracted/first_stage_ramdisk/fstab* "$TWRP_ROOT/system/etc/" || true
+          echo "=== 1. Menyiapkan Kerangka Bersih Berbasis Vendor Ramdisk ORI ==="
+          # Bongkar ulang ramdisk stock vendor_boot ke folder kerja bersih
+          mkdir -p clean_root
+          cd clean_root
+          
+          # Ekstrak cpio stock vendor_boot yang asli
+          CPIO_FILE=$(find "$GITHUB_WORKSPACE/vb_work" -maxdepth 3 -name "*.cpio" | head -n 1)
+          cpio -idmu < "$CPIO_FILE" 2>/dev/null || true
+          
+          echo "=== 2. Memasukkan Mesin TWRP 64-bit ke Kerangka Bersih ==="
+          # Timpa biner recovery dan folder twres/res dari hasil compile TWRP
+          cp -rf "$TWRP_ROOT/system" ./ || true
+          cp -rf "$TWRP_ROOT/sbin" ./ || true
+          cp -rf "$TWRP_ROOT/res" ./ || true
+          cp -rf "$TWRP_ROOT/twres" ./ || true
+          cp -rf "$TWRP_ROOT/ui" ./ || true
+          
+          # Pastikan file init mengarah ke binary recovery / toolbox yang benar
+          rm -f init
+          if [ -f "system/bin/init" ]; then
+            ln -sf system/bin/init init
+          else
+            ln -sf /system/bin/init init
           fi
 
-          if [ -d "ramdisk_extracted/lib/modules" ]; then
-            mkdir -p "$TWRP_ROOT/lib/modules" "$TWRP_ROOT/vendor/lib/modules" "$TWRP_ROOT/first_stage_ramdisk/lib/modules"
-            cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/lib/modules/"
-            cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/vendor/lib/modules/"
-            cp -rf ramdisk_extracted/lib/modules/* "$TWRP_ROOT/first_stage_ramdisk/lib/modules/"
-            rm -f "$TWRP_ROOT/lib/modules/tran_fp.ko" \
-                  "$TWRP_ROOT/vendor/lib/modules/tran_fp.ko" \
-                  "$TWRP_ROOT/first_stage_ramdisk/lib/modules/tran_fp.ko"
+          # Ambil modul .ko asli X6532C (buang tran_fp.ko)
+          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
+            mkdir -p lib/modules vendor/lib/modules first_stage_ramdisk/lib/modules
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* lib/modules/
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* vendor/lib/modules/
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* first_stage_ramdisk/lib/modules/
+            rm -f lib/modules/tran_fp.ko vendor/lib/modules/tran_fp.ko first_stage_ramdisk/lib/modules/tran_fp.ko
           fi
 
-          # Gabungkan isi init.recovery.mt6765.rc bawaan pabrik dengan load_ts.sh kita
-          if [ -f "ramdisk_extracted/init.recovery.mt6765.rc" ]; then
-            cp -f ramdisk_extracted/init.recovery.mt6765.rc "$TWRP_ROOT/init.recovery.mt6765.rc"
-            cat << 'EOF' >> "$TWRP_ROOT/init.recovery.mt6765.rc"
+          # Masukkan fstab ke first_stage_ramdisk jika ada
+          if [ -d "first_stage_ramdisk" ]; then
+            cp -f first_stage_ramdisk/fstab* system/etc/ || true
+          fi
 
+          # Gabungkan init.recovery.mt6765.rc dengan skrip load_ts.sh touchscreen FocalTech
+          cat << 'EOF' > init.recovery.mt6765.rc
           on init
               setprop sys.usb.configfs 1
               setprop sys.usb.ffs.aio_compat 1
               exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
+
+          on fs
+              wait /dev/block/platform/bootdevice
+              symlink /dev/block/platform/bootdevice /dev/block/bootdevice
           EOF
-            chmod 750 "$TWRP_ROOT/init.recovery.mt6765.rc"
-          fi
 
-          ln -sf /system/bin/init "$TWRP_ROOT/init"
+          mkdir -p system/bin
+          cat << 'EOF' > system/bin/load_ts.sh
+          #!/system/bin/sh
+          for mod_dir in /lib/modules /vendor/lib/modules /first_stage_ramdisk/lib/modules; do
+              if [ -d "$mod_dir" ]; then
+                  if [ -f "$mod_dir/modules.load.recovery" ]; then
+                      while read -r line; do
+                          case "$line" in
+                              *tran_fp*) continue ;;
+                              *.ko) insmod "$mod_dir/$line" 2>/dev/null ;;
+                          esac
+                      done < "$mod_dir/modules.load.recovery"
+                  fi
+                  for m in i2c-mt65xx.ko spi-mt65xx.ko i2c_mt65xx.ko spi_mt65xx.ko \
+                           mtk_disp_notify.ko mtk-disp-notify.ko \
+                           mediatek_drm.ko mediatek-drm.ko \
+                           adaptive_ts.ko adaptive-ts.ko \
+                           focaltech_noflash_common.ko novatek_nt36xxx.ko; do
+                      [ -f "$mod_dir/$m" ] && insmod "$mod_dir/$m" 2>/dev/null
+                  done
+              fi
+          done
+          EOF
+          chmod 755 system/bin/load_ts.sh
 
-          ORIG_CPIO=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
-          echo "Target CPIO to replace: $ORIG_CPIO"
-
-          # Gunakan cpio dari hasil build AOSP atau strip './' agar sama persis dengan struktur CPIO standar Android!
-          if [ -f "$OUT_DIR/ramdisk-recovery.img" ]; then
-            echo "Using clean TWRP ramdisk structure..."
-          fi
-
-          cd "$TWRP_ROOT"
-          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+          echo "=== 3. Mengemas Ulang CPIO Bersih dengan Owner root:root (-R 0:0) ==="
+          cd "$GITHUB_WORKSPACE/vb_work/clean_root"
+          find . ! -name "." | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+          
           cd "$GITHUB_WORKSPACE/vb_work"
-
+          ORIG_CPIO=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
           mv -f new_ramdisk.cpio "$ORIG_CPIO"
+
+          echo "=== 4. Repack vendor_boot.img Menggunakan Magiskboot ==="
           ./magiskboot repack vendor_boot.img new-vendor_boot.img
           truncate -s 67108864 new-vendor_boot.img
           mv new-vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
