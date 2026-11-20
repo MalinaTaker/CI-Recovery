@@ -2,11 +2,6 @@ name: CI Recovery
 
 on:
   workflow_dispatch:
-    inputs:
-      fps:
-        description: 'GUI Framerate'
-        required: true
-        default: '30'
 
 jobs:
   build:
@@ -33,13 +28,13 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/vb_work"
           cd "$GITHUB_WORKSPACE/vb_work"
-          
+
           curl -Lo magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk
           unzip -q magisk.apk "lib/x86_64/libmagiskboot.so"
           mv lib/x86_64/libmagiskboot.so ./magiskboot
           chmod +x ./magiskboot
           rm -rf magisk.apk lib
-          
+
           if [ -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
             cp "$GITHUB_WORKSPACE/vendor_boot.img" .
           elif [ -f "$GITHUB_WORKSPACE/vendor_boot.zip" ]; then
@@ -47,17 +42,17 @@ jobs:
           else
             curl -L -o vendor_boot.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot.img"
           fi
-          
+
           ./magiskboot unpack -h vendor_boot.img
           echo "=== Files after magiskboot unpack ==="
           find . -maxdepth 3 -ls
-          
+
           mkdir -p ramdisk_extracted
           for cpio_file in $(find . -maxdepth 3 -name "*.cpio"); do
             echo "Extracting $cpio_file ..."
             (cd ramdisk_extracted && cpio -idmu < "$GITHUB_WORKSPACE/vb_work/$cpio_file" 2>/dev/null) || ./magiskboot cpio "$cpio_file" extract
           done
-          
+
           echo "=== Extracted Modules inside vendor_boot ==="
           find ramdisk_extracted -name "*.ko" -o -name "*.load*" -o -name "fstab*"
 
@@ -70,40 +65,46 @@ jobs:
           repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
           repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-      - name: Generate Device Tree
+      - name: Clone & Convert Device Tree (Infinix-X6532C)
         run: |
-          DEV_PATH="$GITHUB_WORKSPACE/twrp/device/generic/mt6765_rec"
-          mkdir -p "$DEV_PATH/recovery/root/system/etc"
-          mkdir -p "$DEV_PATH/recovery/root/system/bin"
-          mkdir -p "$DEV_PATH/prebuilt"
+          DEV_PATH="$GITHUB_WORKSPACE/twrp/device/infinix/Infinix-X6532C"
+          rm -rf "$DEV_PATH"
+          git clone --depth=1 -b vnd_x6532c_mf380-user-12-SP1A.210812.016-892863-release-keys \
+            https://github.com/twrpdtgen/android_device_infinix_Infinix-X6532C.git "$DEV_PATH"
 
-          dd if=/dev/zero of="$DEV_PATH/prebuilt/kernel" bs=1024 count=64
-          cp "$GITHUB_WORKSPACE/vb_work/dtb" "$DEV_PATH/prebuilt/dtb.img" || dd if=/dev/zero of="$DEV_PATH/prebuilt/dtb.img" bs=1024 count=64
-          cp "$DEV_PATH/prebuilt/dtb.img" "$DEV_PATH/prebuilt/mt6765.dtb"
+          cd "$DEV_PATH"
+          echo "=== Isi Asli Device Tree ==="
+          ls -la
 
-          cat << 'EOF' > "$DEV_PATH/AndroidProducts.mk"
-          PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_mt6765_rec.mk
-          COMMON_LUNCH_CHOICES := twrp_mt6765_rec-eng
-          EOF
+          # 1. Hapus vendorsetup.sh (usang di twrp-12.1) & rename omni_ ke twrp_
+          rm -f vendorsetup.sh
+          if [ -f "omni_Infinix-X6532C.mk" ]; then
+            mv omni_Infinix-X6532C.mk twrp_Infinix-X6532C.mk
+          fi
 
-          cat << 'EOF' > "$DEV_PATH/twrp_mt6765_rec.mk"
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
-          $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
-          $(call inherit-product, vendor/twrp/config/common.mk)
+          # 2. Konversi referensi omni ke twrp-12.1
+          sed -i 's/omni_Infinix-X6532C/twrp_Infinix-X6532C/g' AndroidProducts.mk twrp_Infinix-X6532C.mk
+          sed -i 's|vendor/omni/config/common.mk|vendor/twrp/config/common.mk|g' twrp_Infinix-X6532C.mk
+          sed -i 's/full_base_telephony.mk/base.mk/g' twrp_Infinix-X6532C.mk
+          sed -i 's/aosp_base.mk/base.mk/g' twrp_Infinix-X6532C.mk
 
-          PRODUCT_NAME := twrp_mt6765_rec
-          PRODUCT_DEVICE := mt6765_rec
-          PRODUCT_BRAND := generic
-          PRODUCT_MODEL := Generic MT6765
-          PRODUCT_MANUFACTURER := generic
-          PRODUCT_COPY_FILES += $(call find-copy-subdir-files,*,device/generic/mt6765_rec/recovery/root,recovery/root)
-          EOF
+          if ! grep -q "core_64_bit.mk" twrp_Infinix-X6532C.mk; then
+            sed -i '1i $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)' twrp_Infinix-X6532C.mk
+          fi
 
-          cat << EOF > "$DEV_PATH/BoardConfig.mk"
-          DEVICE_PATH := device/generic/mt6765_rec
+          # 3. Pastikan prebuilt dtb tersedia dalam format .dtb dan .img
+          mkdir -p prebuilt
+          cp -f "$GITHUB_WORKSPACE/vb_work/dtb" prebuilt/dtb.img 2>/dev/null || true
+          cp -f prebuilt/dtb.img prebuilt/mt6765.dtb 2>/dev/null || true
+
+          # 4. Tambahkan override Dual-Arch (arm64 + arm) & setting TWRP 12.1 di akhir BoardConfig.mk
+          cat << 'EOF' >> BoardConfig.mk
+
+          # === Override untuk twrp-12.1 & GKI 64-bit Recovery ===
           ALLOW_MISSING_DEPENDENCIES := true
           BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
           BUILD_BROKEN_DUP_RULES := true
+          TARGET_COPY_OUT_VENDOR := vendor
 
           TARGET_ARCH := arm64
           TARGET_ARCH_VARIANT := armv8-a
@@ -117,83 +118,17 @@ jobs:
           TARGET_2ND_CPU_ABI2 := armeabi
           TARGET_2ND_CPU_VARIANT := cortex-a53
 
-          TARGET_COPY_OUT_VENDOR := vendor
-          TARGET_NO_BOOTLOADER := true
-          TARGET_PREBUILT_KERNEL := \$(DEVICE_PATH)/prebuilt/kernel
-          BOARD_PREBUILT_DTBIMAGE_DIR := \$(DEVICE_PATH)/prebuilt
-          BOARD_INCLUDE_DTB_IN_BOOTIMG := true
-          BOARD_BOOT_HEADER_VERSION := 2
-          BOARD_MKBOOTIMG_ARGS += --header_version 2
-
-          BOARD_FLASH_BLOCK_SIZE := 131072
-          BOARD_KERNEL_PAGESIZE := 2048
-          BOARD_RECOVERYIMAGE_PARTITION_SIZE := 67108864
-
-          BOARD_SUPER_PARTITION_SIZE := 5368709120
-          BOARD_SUPER_PARTITION_GROUPS := main_dynamic_partitions
-          BOARD_MAIN_DYNAMIC_PARTITIONS_SIZE := 5364514816
-          BOARD_MAIN_DYNAMIC_PARTITIONS_PARTITION_LIST := system system_ext vendor product
-
-          TARGET_USERIMAGES_USE_EXT4 := true
-          TARGET_USERIMAGES_USE_F2FS := true
-          BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := f2fs
-
+          TW_FRAMERATE := 30
           TW_THEME := portrait_hdpi
           TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
-          TARGET_SCREEN_WIDTH := 720
-          TARGET_SCREEN_HEIGHT := 1600
-          TW_FRAMERATE := ${{ github.event.inputs.fps }}
-          TW_BRIGHTNESS_PATH := "/sys/class/leds/lcd-backlight/brightness"
-          TW_MAX_BRIGHTNESS := 2047
-          TW_DEFAULT_BRIGHTNESS := 1024
-          TW_INCLUDE_NTFS_3G := true
           TW_USE_TOOLBOX := true
-          TW_EXCLUDE_DEFAULT_USB_INIT := true
           TW_INCLUDE_REPACKTOOLS := true
           TW_HAS_MTP := true
           EOF
 
-          cat << 'EOF' > "$DEV_PATH/recovery/root/system/etc/recovery.fstab"
-          /system          erofs     system                                     flags=display="System";logical;slotselect
-          /system          ext4      system                                     flags=display="System (EXT4)";logical;slotselect
-          /system_ext      erofs     system_ext                                 flags=display="System_Ext";logical;slotselect
-          /system_ext      ext4      system_ext                                 flags=display="System_Ext (EXT4)";logical;slotselect
-          /vendor          erofs     vendor                                     flags=display="Vendor";logical;slotselect
-          /vendor          ext4      vendor                                     flags=display="Vendor (EXT4)";logical;slotselect
-          /product         erofs     product                                    flags=display="Product";logical;slotselect
-          /product         ext4      product                                    flags=display="Product (EXT4)";logical;slotselect
-
-          /metadata        ext4      /dev/block/by-name/md_udc                  flags=display="Metadata";wipeingui;formattable
-          /data            f2fs      /dev/block/by-name/userdata                flags=display="Data";wipeingui;formattable;fileencryption=aes-256-xts:aes-256-cts:v2
-          /tranfs          ext4      /dev/block/by-name/tranfs                  flags=display="Tranfs";wipeingui
-          /persist         ext4      /dev/block/by-name/persist                 flags=display="Persist";backup=1
-          /nvram           emmc      /dev/block/by-name/nvram                   flags=display="NVRAM";backup=1;flashimg=1
-          /nvdata          ext4      /dev/block/by-name/nvdata                  flags=display="NVData";backup=1
-          /nvcfg           ext4      /dev/block/by-name/nvcfg                   flags=display="NVCfg";backup=1
-          /boot            emmc      /dev/block/by-name/boot                    flags=display="Boot";slotselect;backup=1;flashimg=1
-          /vendor_boot     emmc      /dev/block/by-name/vendor_boot             flags=display="Vendor_Boot";slotselect;backup=1;flashimg=1
-          /dtbo            emmc      /dev/block/by-name/dtbo                    flags=display="DTBO";slotselect;backup=1;flashimg=1
-          /vbmeta          emmc      /dev/block/by-name/vbmeta                  flags=display="VBMeta";backup=1;flashimg=1
-          /vbmeta_system   emmc      /dev/block/by-name/vbmeta_system           flags=display="VBMeta_System";slotselect;backup=1;flashimg=1
-          /vbmeta_vendor   emmc      /dev/block/by-name/vbmeta_vendor           flags=display="VBMeta_Vendor";slotselect;backup=1;flashimg=1
-          /misc            emmc      /dev/block/by-name/para                    flags=display="Misc"
-
-          /external_sd     auto      /dev/block/mmcblk1p1  /dev/block/mmcblk1   flags=display="MicroSD";storage;wipeingui;removable
-          /usb_otg         auto      /dev/block/sda1       /dev/block/sda       flags=display="USB-OTG";storage;wipeingui;removable
-          EOF
-
-          cat << 'EOF' > "$DEV_PATH/recovery/root/init.recovery.mt6765.rc"
-          on init
-              setprop sys.usb.configfs 1
-              setprop sys.usb.ffs.aio_compat 1
-              exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
-
-          on fs
-              wait /dev/block/platform/bootdevice
-              symlink /dev/block/platform/bootdevice /dev/block/bootdevice
-          EOF
-
-          cat << 'EOF' > "$DEV_PATH/recovery/root/system/bin/load_ts.sh"
+          # 5. Siapkan skrip load_ts.sh untuk touchscreen FocalTech
+          mkdir -p recovery/root/system/bin
+          cat << 'EOF' > recovery/root/system/bin/load_ts.sh
           #!/system/bin/sh
           for mod_dir in /lib/modules /vendor/lib/modules /first_stage_ramdisk/lib/modules; do
               if [ -d "$mod_dir" ]; then
@@ -212,69 +147,69 @@ jobs:
                            focaltech_noflash_common.ko novatek_nt36xxx.ko; do
                       [ -f "$mod_dir/$m" ] && insmod "$mod_dir/$m" 2>/dev/null
                   done
-                  if [ -f "$mod_dir/modules.load" ]; then
-                      while read -r line; do
-                          case "$line" in
-                              *tran_fp*) continue ;;
-                              *.ko) insmod "$mod_dir/$line" 2>/dev/null ;;
-                          esac
-                      done < "$mod_dir/modules.load"
-                  fi
               fi
           done
           EOF
-          chmod 755 "$DEV_PATH/recovery/root/system/bin/load_ts.sh"
+          chmod 755 recovery/root/system/bin/load_ts.sh
+
+          # Tambahkan pemanggilan load_ts.sh ke init.recovery.mt6765.rc bawaan tanpa menghapus isi aslinya
+          cat << 'EOF' >> recovery/root/init.recovery.mt6765.rc
+
+          on init
+              setprop sys.usb.configfs 1
+              setprop sys.usb.ffs.aio_compat 1
+              exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
+          EOF
 
       - name: Compile Recovery Ramdisk
         run: |
           cd "$GITHUB_WORKSPACE/twrp"
           source build/envsetup.sh
-          lunch twrp_mt6765_rec-eng
-          
-          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
+          lunch twrp_Infinix-X6532C-eng
+
+          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/Infinix-X6532C"
           mkdir -p "$OUT_DIR"
           cp -f "$GITHUB_WORKSPACE/vb_work/dtb" "$OUT_DIR/dtb.img" || true
-          
-          mka -j$(nproc --all) ramdisk-recovery.img || mka -j$(nproc --all) recoveryimage || true
-          
+
+          mka -j$(nproc --all) vendorbootimage || mka -j$(nproc --all) ramdisk-recovery.img || mka -j$(nproc --all) recoveryimage || true
+
           if [ ! -f "$OUT_DIR/recovery/root/system/bin/recovery" ]; then
             echo "Error: Binary recovery belum terbentuk!"
             exit 1
           fi
-          echo "=== Compile TWRP Ramdisk 64-bit Sukses! ==="
+          echo "=== Compile TWRP Ramdisk Infinix-X6532C 100% Sukses! ==="
 
       - name: Inject Recovery into Stock Vendor Boot
         run: |
           cd "$GITHUB_WORKSPACE/vb_work"
-          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/mt6765_rec"
+          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/Infinix-X6532C"
           TWRP_ROOT="$OUT_DIR/recovery/root"
 
           echo "=== 1. Menyiapkan Kerangka Bersih Berbasis Vendor Ramdisk ORI ==="
-          # Bongkar ulang ramdisk stock vendor_boot ke folder kerja bersih
+          rm -rf clean_root
           mkdir -p clean_root
           cd clean_root
-          
-          # Ekstrak cpio stock vendor_boot yang asli
+
           CPIO_FILE=$(find "$GITHUB_WORKSPACE/vb_work" -maxdepth 3 -name "*.cpio" | head -n 1)
           cpio -idmu < "$CPIO_FILE" 2>/dev/null || true
-          
+
           echo "=== 2. Memasukkan Mesin TWRP 64-bit ke Kerangka Bersih ==="
-          # Timpa biner recovery dan folder twres/res dari hasil compile TWRP
           cp -rf "$TWRP_ROOT/system" ./ || true
           cp -rf "$TWRP_ROOT/sbin" ./ || true
           cp -rf "$TWRP_ROOT/res" ./ || true
           cp -rf "$TWRP_ROOT/twres" ./ || true
           cp -rf "$TWRP_ROOT/ui" ./ || true
-          
-          # Pastikan file init mengarah ke binary recovery / toolbox yang benar
-          rm -f init
-          if [ -f "system/bin/init" ]; then
-            ln -sf system/bin/init init
-          else
-            ln -sf /system/bin/init init
+          cp -f "$TWRP_ROOT/init.recovery.mt6765.rc" ./ 2>/dev/null || true
+          cp -f "$TWRP_ROOT/mtk-plpath-utils.rc" ./ 2>/dev/null || true
+          cp -f "$TWRP_ROOT/snapuserd.rc" ./ 2>/dev/null || true
+
+          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ]; then
+            rm -rf first_stage_ramdisk
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ./
+            mkdir -p system/etc
+            cp -f first_stage_ramdisk/fstab* system/etc/ 2>/dev/null || true
           fi
 
-          # Ambil modul .ko asli X6532C (buang tran_fp.ko)
           if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
             mkdir -p lib/modules vendor/lib/modules first_stage_ramdisk/lib/modules
             cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* lib/modules/
@@ -283,55 +218,15 @@ jobs:
             rm -f lib/modules/tran_fp.ko vendor/lib/modules/tran_fp.ko first_stage_ramdisk/lib/modules/tran_fp.ko
           fi
 
-          # Masukkan fstab ke first_stage_ramdisk jika ada
-          if [ -d "first_stage_ramdisk" ]; then
-            cp -f first_stage_ramdisk/fstab* system/etc/ || true
-          fi
-
-          # Gabungkan init.recovery.mt6765.rc dengan skrip load_ts.sh touchscreen FocalTech
-          cat << 'EOF' > init.recovery.mt6765.rc
-          on init
-              setprop sys.usb.configfs 1
-              setprop sys.usb.ffs.aio_compat 1
-              exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
-
-          on fs
-              wait /dev/block/platform/bootdevice
-              symlink /dev/block/platform/bootdevice /dev/block/bootdevice
-          EOF
-
-          mkdir -p system/bin
-          cat << 'EOF' > system/bin/load_ts.sh
-          #!/system/bin/sh
-          for mod_dir in /lib/modules /vendor/lib/modules /first_stage_ramdisk/lib/modules; do
-              if [ -d "$mod_dir" ]; then
-                  if [ -f "$mod_dir/modules.load.recovery" ]; then
-                      while read -r line; do
-                          case "$line" in
-                              *tran_fp*) continue ;;
-                              *.ko) insmod "$mod_dir/$line" 2>/dev/null ;;
-                          esac
-                      done < "$mod_dir/modules.load.recovery"
-                  fi
-                  for m in i2c-mt65xx.ko spi-mt65xx.ko i2c_mt65xx.ko spi_mt65xx.ko \
-                           mtk_disp_notify.ko mtk-disp-notify.ko \
-                           mediatek_drm.ko mediatek-drm.ko \
-                           adaptive_ts.ko adaptive-ts.ko \
-                           focaltech_noflash_common.ko novatek_nt36xxx.ko; do
-                      [ -f "$mod_dir/$m" ] && insmod "$mod_dir/$m" 2>/dev/null
-                  done
-              fi
-          done
-          EOF
-          chmod 755 system/bin/load_ts.sh
+          rm -f init
+          ln -sf /system/bin/init init
 
           echo "=== 3. Mengemas Ulang CPIO Bersih dengan Owner root:root (-R 0:0) ==="
           cd "$GITHUB_WORKSPACE/vb_work/clean_root"
-          find . ! -name "." | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
-          
+          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+
           cd "$GITHUB_WORKSPACE/vb_work"
-          ORIG_CPIO=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
-          mv -f new_ramdisk.cpio "$ORIG_CPIO"
+          mv -f new_ramdisk.cpio "$CPIO_FILE"
 
           echo "=== 4. Repack vendor_boot.img Menggunakan Magiskboot ==="
           ./magiskboot repack vendor_boot.img new-vendor_boot.img
