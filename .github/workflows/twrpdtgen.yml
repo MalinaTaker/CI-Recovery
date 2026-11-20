@@ -115,7 +115,12 @@ jobs:
           TW_THEME := portrait_hdpi
           TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
           TW_USE_TOOLBOX := true
-          TW_INCLUDE_REPACKTOOLS := true
+          TW_INCLUDE_REPACKTOOLS := false
+          TW_EXCLUDE_TWRPAPP := true
+          TW_EXCLUDE_APEX := true
+          TW_EXCLUDE_NANO := true
+          TW_EXCLUDE_BASH := true
+          TW_EXCLUDE_PYTHON := true
           TW_HAS_MTP := true
           EOF
 
@@ -205,6 +210,13 @@ jobs:
           # 3. Pastikan symlink /init mengarah ke /system/bin/init
           rm -f init
           ln -sf /system/bin/init init
+
+          # Pangkas file non-esensial agar uncompressed CPIO turun di bawah 60 MB
+          rm -rf system/etc/terminfo
+          rm -f system/bin/nano system/bin/bash system/bin/zip
+          if [ -d "twres/languages" ]; then
+            find twres/languages -type f ! -name "en.xml" -delete
+          fi
 
           echo "=== Mengemas Ulang CPIO Ramping (Owner root:root) ==="
           find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
