@@ -210,7 +210,7 @@ jobs:
           find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
 
           cd "$GITHUB_WORKSPACE/vb_work"
-          CPIO_FILE=$(find . -maxdepth 3 -name "*.cpio" | head -n 1)
+          CPIO_FILE=$(find . -maxdepth 3 -name "*.cpio" ! -name "new_ramdisk.cpio" | head -n 1)
           mv -f new_ramdisk.cpio "$CPIO_FILE"
 
           echo "=== Repack vendor_boot.img (Tanpa Truncate) ==="
