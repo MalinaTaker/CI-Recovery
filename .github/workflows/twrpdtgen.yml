@@ -1,0 +1,247 @@
+name: TWRPDTGEN Recovery
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space & Setup Swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo fallocate -l 16G /swapfile_twrp
+          sudo chmod 600 /swapfile_twrp
+          sudo mkswap /swapfile_twrp
+          sudo swapon /swapfile_twrp
+          sudo apt-get update
+          sudo apt-get install -y git repo bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib gnupg gperf imagemagick lib32ncurses5-dev \
+            lib32readline-dev lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev python-is-python3 cpio lz4 xz-utils p7zip-full file
+
+      - name: Extract Vendor Boot & Inspect Modules
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/vb_work"
+          cd "$GITHUB_WORKSPACE/vb_work"
+
+          curl -Lo magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk
+          unzip -q magisk.apk "lib/x86_64/libmagiskboot.so"
+          mv lib/x86_64/libmagiskboot.so ./magiskboot
+          chmod +x ./magiskboot
+          rm -rf magisk.apk lib
+
+          if [ -f "$GITHUB_WORKSPACE/vendor_boot.img" ]; then
+            cp "$GITHUB_WORKSPACE/vendor_boot.img" .
+          elif [ -f "$GITHUB_WORKSPACE/vendor_boot.zip" ]; then
+            7z x "$GITHUB_WORKSPACE/vendor_boot.zip" -o. -y || unzip -q "$GITHUB_WORKSPACE/vendor_boot.zip" -d .
+          else
+            curl -L -o vendor_boot.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot.img"
+          fi
+
+          ./magiskboot unpack -h vendor_boot.img
+          echo "=== Files after magiskboot unpack ==="
+          find . -maxdepth 3 -ls
+
+          mkdir -p ramdisk_extracted
+          for cpio_file in $(find . -maxdepth 3 -name "*.cpio"); do
+            echo "Extracting $cpio_file ..."
+            (cd ramdisk_extracted && cpio -idmu < "$GITHUB_WORKSPACE/vb_work/$cpio_file" 2>/dev/null) || ./magiskboot cpio "$cpio_file" extract
+          done
+
+          echo "=== Extracted Modules inside vendor_boot ==="
+          find ramdisk_extracted -name "*.ko" -o -name "*.load*" -o -name "fstab*"
+
+      - name: Sync Minimal TWRP 12.1 Manifest
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/twrp"
+          cd "$GITHUB_WORKSPACE/twrp"
+          git config --global user.name "builder"
+          git config --global user.email "builder@localhost"
+          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+      - name: Clone & Convert Device Tree (Infinix-X6532C)
+        run: |
+          DEV_PATH="$GITHUB_WORKSPACE/twrp/device/infinix/Infinix-X6532C"
+          rm -rf "$DEV_PATH"
+          git clone --depth=1 -b vnd_x6532c_mf380-user-12-SP1A.210812.016-892863-release-keys \
+            https://github.com/twrpdtgen/android_device_infinix_Infinix-X6532C.git "$DEV_PATH"
+
+          cd "$DEV_PATH"
+          echo "=== Isi Asli Device Tree ==="
+          ls -la
+
+          # 1. Hapus vendorsetup.sh (usang di twrp-12.1) & rename omni_ ke twrp_
+          rm -f vendorsetup.sh
+          if [ -f "omni_Infinix-X6532C.mk" ]; then
+            mv omni_Infinix-X6532C.mk twrp_x6532C.mk
+          fi
+
+          # 2. Konversi referensi omni ke twrp-12.1
+          cat << 'EOF' > AndroidProducts.mk
+          PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_x6532c.mk
+          COMMON_LUNCH_CHOICES := twrp_x6532c-eng
+          EOF
+          
+          sed -i 's/omni_Infinix-X6532C/twrp_x6532c/g' twrp_x6532c.mk
+          sed -i 's|vendor/omni/config/common.mk|vendor/twrp/config/common.mk|g' twrp_x6532c.mk
+          sed -i 's/full_base_telephony.mk/base.mk/g' twrp_x6532c.mk
+          sed -i 's/aosp_base.mk/base.mk/g' twrp_x6532c.mk
+
+          if ! grep -q "core_64_bit.mk" twrp_x6532c.mk; then
+            sed -i '1i $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)' twrp_x6532c.mk
+          fi
+
+          # 3. Pastikan prebuilt dtb tersedia dalam format .dtb dan .img
+          mkdir -p prebuilt
+          cp -f "$GITHUB_WORKSPACE/vb_work/dtb" prebuilt/dtb.img 2>/dev/null || true
+          cp -f prebuilt/dtb.img prebuilt/mt6765.dtb 2>/dev/null || true
+
+          # 4. Tambahkan override Dual-Arch (arm64 + arm) & setting TWRP 12.1 di akhir BoardConfig.mk
+          cat << 'EOF' >> BoardConfig.mk
+
+          # === Override untuk twrp-12.1 & GKI 64-bit Recovery ===
+          ALLOW_MISSING_DEPENDENCIES := true
+          BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
+          BUILD_BROKEN_DUP_RULES := true
+          TARGET_COPY_OUT_VENDOR := vendor
+
+          TARGET_ARCH := arm64
+          TARGET_ARCH_VARIANT := armv8-a
+          TARGET_CPU_ABI := arm64-v8a
+          TARGET_CPU_ABI2 :=
+          TARGET_CPU_VARIANT := cortex-a53
+
+          TARGET_2ND_ARCH := arm
+          TARGET_2ND_ARCH_VARIANT := armv8-a
+          TARGET_2ND_CPU_ABI := armeabi-v7a
+          TARGET_2ND_CPU_ABI2 := armeabi
+          TARGET_2ND_CPU_VARIANT := cortex-a53
+
+          TW_FRAMERATE := 30
+          TW_THEME := portrait_hdpi
+          TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
+          TW_USE_TOOLBOX := true
+          TW_INCLUDE_REPACKTOOLS := true
+          TW_HAS_MTP := true
+          EOF
+
+          # 5. Siapkan skrip load_ts.sh untuk touchscreen FocalTech
+          mkdir -p recovery/root/system/bin
+          cat << 'EOF' > recovery/root/system/bin/load_ts.sh
+          #!/system/bin/sh
+          for mod_dir in /lib/modules /vendor/lib/modules /first_stage_ramdisk/lib/modules; do
+              if [ -d "$mod_dir" ]; then
+                  if [ -f "$mod_dir/modules.load.recovery" ]; then
+                      while read -r line; do
+                          case "$line" in
+                              *tran_fp*) continue ;;
+                              *.ko) insmod "$mod_dir/$line" 2>/dev/null ;;
+                          esac
+                      done < "$mod_dir/modules.load.recovery"
+                  fi
+                  for m in i2c-mt65xx.ko spi-mt65xx.ko i2c_mt65xx.ko spi_mt65xx.ko \
+                           mtk_disp_notify.ko mtk-disp-notify.ko \
+                           mediatek_drm.ko mediatek-drm.ko \
+                           adaptive_ts.ko adaptive-ts.ko \
+                           focaltech_noflash_common.ko novatek_nt36xxx.ko; do
+                      [ -f "$mod_dir/$m" ] && insmod "$mod_dir/$m" 2>/dev/null
+                  done
+              fi
+          done
+          EOF
+          chmod 755 recovery/root/system/bin/load_ts.sh
+
+          # Tambahkan pemanggilan load_ts.sh ke init.recovery.mt6765.rc bawaan tanpa menghapus isi aslinya
+          cat << 'EOF' >> recovery/root/init.recovery.mt6765.rc
+
+          on init
+              setprop sys.usb.configfs 1
+              setprop sys.usb.ffs.aio_compat 1
+              exec u:r:recovery:s0 -- /system/bin/sh /system/bin/load_ts.sh
+          EOF
+
+      - name: Compile Recovery Ramdisk
+        run: |
+          cd "$GITHUB_WORKSPACE/twrp"
+          source build/envsetup.sh
+          lunch twrp_x6532c-eng
+
+          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/Infinix-X6532C"
+          mkdir -p "$OUT_DIR"
+          cp -f "$GITHUB_WORKSPACE/vb_work/dtb" "$OUT_DIR/dtb.img" || true
+
+          mka -j$(nproc --all) vendorbootimage || mka -j$(nproc --all) ramdisk-recovery.img || mka -j$(nproc --all) recoveryimage || true
+
+          if [ ! -f "$OUT_DIR/recovery/root/system/bin/recovery" ]; then
+            echo "Error: Binary recovery belum terbentuk!"
+            exit 1
+          fi
+          echo "=== Compile TWRP Ramdisk Infinix-X6532C 100% Sukses! ==="
+
+      - name: Inject Recovery into Stock Vendor Boot
+        run: |
+          cd "$GITHUB_WORKSPACE/vb_work"
+          OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/Infinix-X6532C"
+          TWRP_ROOT="$OUT_DIR/recovery/root"
+
+          echo "=== 1. Menyiapkan Kerangka Bersih Berbasis Vendor Ramdisk ORI ==="
+          rm -rf clean_root
+          mkdir -p clean_root
+          cd clean_root
+
+          CPIO_FILE=$(find "$GITHUB_WORKSPACE/vb_work" -maxdepth 3 -name "*.cpio" | head -n 1)
+          cpio -idmu < "$CPIO_FILE" 2>/dev/null || true
+
+          echo "=== 2. Memasukkan Mesin TWRP 64-bit ke Kerangka Bersih ==="
+          cp -rf "$TWRP_ROOT/system" ./ || true
+          cp -rf "$TWRP_ROOT/sbin" ./ || true
+          cp -rf "$TWRP_ROOT/res" ./ || true
+          cp -rf "$TWRP_ROOT/twres" ./ || true
+          cp -rf "$TWRP_ROOT/ui" ./ || true
+          cp -f "$TWRP_ROOT/init.recovery.mt6765.rc" ./ 2>/dev/null || true
+          cp -f "$TWRP_ROOT/mtk-plpath-utils.rc" ./ 2>/dev/null || true
+          cp -f "$TWRP_ROOT/snapuserd.rc" ./ 2>/dev/null || true
+
+          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ]; then
+            rm -rf first_stage_ramdisk
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ./
+            mkdir -p system/etc
+            cp -f first_stage_ramdisk/fstab* system/etc/ 2>/dev/null || true
+          fi
+
+          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
+            mkdir -p lib/modules vendor/lib/modules first_stage_ramdisk/lib/modules
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* lib/modules/
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* vendor/lib/modules/
+            cp -rf "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules/"* first_stage_ramdisk/lib/modules/
+            rm -f lib/modules/tran_fp.ko vendor/lib/modules/tran_fp.ko first_stage_ramdisk/lib/modules/tran_fp.ko
+          fi
+
+          rm -f init
+          ln -sf /system/bin/init init
+
+          echo "=== 3. Mengemas Ulang CPIO Bersih dengan Owner root:root (-R 0:0) ==="
+          cd "$GITHUB_WORKSPACE/vb_work/clean_root"
+          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+
+          cd "$GITHUB_WORKSPACE/vb_work"
+          mv -f new_ramdisk.cpio "$CPIO_FILE"
+
+          echo "=== 4. Repack vendor_boot.img Menggunakan Magiskboot ==="
+          ./magiskboot repack vendor_boot.img new-vendor_boot.img
+          truncate -s 67108864 new-vendor_boot.img
+          mv new-vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+          ls -lh "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+
+      - name: Upload Output
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-package
+          path: |
+            vendor_boot-twrp.img
