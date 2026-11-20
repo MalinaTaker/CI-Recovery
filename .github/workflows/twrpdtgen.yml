@@ -81,6 +81,8 @@ jobs:
           mv -f omni_Infinix-X6532C.mk twrp_x6532c.mk
 
           # 2. Tulis ulang AndroidProducts.mk & konversi referensi di twrp_x6532c.mk
+          # Hapus blok PRODUCT_STATIC_BOOT_CONTROL_HAL yang usang di twrp-12.1
+          awk '/PRODUCT_STATIC_BOOT_CONTROL_HAL/{skip=1} !skip{print} skip && !/\\$/{skip=0}' device.mk > device.mk.tmp && mv device.mk.tmp device.mk
           cat << 'EOF' > AndroidProducts.mk
           PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_x6532c.mk
           COMMON_LUNCH_CHOICES := twrp_x6532c-eng
