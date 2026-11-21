@@ -259,9 +259,13 @@ jobs:
             --vendor_ramdisk_fragment "$GITHUB_WORKSPACE/vb_work/recovery.lz4" \
             --vendor_boot "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
 
-          echo "=== Verifikasi Header Hasil Multi-Ramdisk ==="
-          ./magiskboot unpack -h "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
-          ls -lh "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+            # 4. Tambahkan AVB Hash Footer (VBMETA) dan sesuaikan ukuran ke 64 MB
+          AVBTOOL="$GITHUB_WORKSPACE/twrp/out/host/linux-x86/bin/avbtool"
+          [ ! -f "$AVBTOOL" ] && AVBTOOL="python3 $GITHUB_WORKSPACE/twrp/external/avb/avbtool.py"
+          $AVBTOOL add_hash_footer \
+            --image "$GITHUB_WORKSPACE/vendor_boot-twrp.img" \
+            --partition_size 67108864 \
+            --partition_name vendor_boot
 
           echo "=== Verifikasi Header Hasil Multi-Ramdisk ==="
           ./magiskboot unpack -h "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
