@@ -7,7 +7,7 @@ jobs:
   inspect:
     runs-on: ubuntu-22.04
     steps:
-      - name: Download & Inspect with Magiskboot
+      - name: Compare Offsets & Init Structure
         run: |
           sudo apt-get update && sudo apt-get install -y unzip curl cpio file
           mkdir -p work && cd work
@@ -20,14 +20,17 @@ jobs:
 
           curl -L -o vendor_boot_x6532.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot_x6532.img"
 
-          echo "=== 1. MAGISKBOOT UNPACK HEADER ==="
+          echo "=== 1. OFFSET MEMORI X6532 ==="
+          python3 -c '
+          import struct
+          with open("vendor_boot_x6532.img", "rb") as f:
+              d = f.read(2128)
+          k, r, rsz = struct.unpack_from("<III", d, 16)
+          t = struct.unpack_from("<I", d, 2076)[0]
+          hsz, dsz, daddr = struct.unpack_from("<IIQ", d, 2096)
+          print(f"kernel=0x{k:08x} ramdisk=0x{r:08x} tags=0x{t:08x} dtb=0x{daddr:08x} hdr_sz={hsz}")
+          '
+
+          echo "=== 2. UNPACK & CEK /init DI RECOVERY.CPIO ==="
           ./magiskboot unpack -h vendor_boot_x6532.img
-
-          echo "=== 2. DAFTAR FILE HASIL UNPACK ==="
-          ls -lh
-
-          echo "=== 3. ISI RAMDISK CPIO ==="
-          for f in $(find . -maxdepth 3 -name "*.cpio" | sort); do
-            echo "--- File: $f ($(ls -lh "$f" | awk '{print $5}')) ---"
-            cpio -t < "$f" 2>/dev/null | head -n 40 || ./magiskboot cpio "$f" "ls /"
-          done
+          cpio -tv < vendor_ramdisk/recovery.cpio 2>/dev/null | grep -E " (init|system/bin/init|system/bin/recovery)$"
