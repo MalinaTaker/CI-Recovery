@@ -177,18 +177,26 @@ jobs:
           fi
           echo "=== Compile TWRP 64-bit Murni Sukses! ==="
 
-      - name: Inject Pure Slim TWRP into Stock Vendor Boot
+      - name: Build Multi-Ramdisk Vendor Boot (v4)
         run: |
           cd "$GITHUB_WORKSPACE/vb_work"
           OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/Infinix-X6532C"
           TWRP_ROOT="$OUT_DIR/recovery/root"
 
-          # Gunakan TWRP_ROOT murni (TANPA overlay stock recovery)
-          rm -rf pure_root
-          cp -a "$TWRP_ROOT" pure_root
-          cd pure_root
+          # 1. Siapkan fragmen PLATFORM (hanya first_stage_ramdisk dari stock)
+          rm -rf plat_root
+          mkdir -p plat_root
+          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ]; then
+            cp -a "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" plat_root/
+          fi
+          (cd plat_root && find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/platform.cpio")
+          ./magiskboot compress=lz4_legacy platform.cpio platform.lz4
 
-          # 1. Ambil hanya first_stage_ramdisk dari stock (untuk fstab & boot Android)
+          # 2. Siapkan fragmen RECOVERY (TWRP murni + lib/modules & fstab stock)
+          rm -rf rec_root
+          cp -a "$TWRP_ROOT" rec_root
+          cd rec_root
+
           if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ]; then
             rm -rf first_stage_ramdisk
             cp -a "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ./
@@ -197,7 +205,6 @@ jobs:
             cp -f first_stage_ramdisk/fstab* system/etc/ 2>/dev/null || true
           fi
 
-          # 2. Simpan lib/modules 1 kali saja, sisanya symlink agar tidak bengkak
           if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
             rm -rf lib/modules vendor/lib/modules
             mkdir -p lib vendor/lib first_stage_ramdisk/lib
@@ -207,26 +214,37 @@ jobs:
             ln -s /lib/modules first_stage_ramdisk/lib/modules
           fi
 
-          # 3. Pastikan symlink /init mengarah ke /system/bin/init
           rm -f init
           ln -sf /system/bin/init init
 
-          # Pangkas file non-esensial agar uncompressed CPIO turun di bawah 60 MB
+          # Pangkas file non-esensial agar ramdisk tetap bersih
           rm -rf system/etc/terminfo
           rm -f system/bin/nano system/bin/bash system/bin/zip
           if [ -d "twres/languages" ]; then
             find twres/languages -type f ! -name "en.xml" -delete
           fi
 
-          echo "=== Mengemas Ulang CPIO Ramping (Owner root:root) ==="
-          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
-
+          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/recovery.cpio"
           cd "$GITHUB_WORKSPACE/vb_work"
-          CPIO_FILE=$(find . -maxdepth 3 -name "*.cpio" ! -name "new_ramdisk.cpio" | head -n 1)
-          mv -f new_ramdisk.cpio "$CPIO_FILE"
+          ./magiskboot compress=lz4_legacy recovery.cpio recovery.lz4
 
-          echo "=== Repack vendor_boot.img (Tanpa Truncate) ==="
-          ./magiskboot repack vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+          # 3. Rakit vendor_boot v4 Multi-Ramdisk menggunakan mkbootimg.py
+          MKBOOTIMG="$GITHUB_WORKSPACE/twrp/system/tools/mkbootimg/mkbootimg.py"
+          python3 "$MKBOOTIMG" \
+            --header_version 4 \
+            --pagesize 4096 \
+            --vendor_cmdline "bootopt=64S3,32N2,64N2" \
+            --dtb "$GITHUB_WORKSPACE/vb_work/dtb" \
+            --ramdisk_type platform \
+            --ramdisk_name "" \
+            --vendor_ramdisk_fragment "$GITHUB_WORKSPACE/vb_work/platform.lz4" \
+            --ramdisk_type recovery \
+            --ramdisk_name recovery \
+            --vendor_ramdisk_fragment "$GITHUB_WORKSPACE/vb_work/recovery.lz4" \
+            --vendor_boot "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+
+          echo "=== Verifikasi Header Hasil Multi-Ramdisk ==="
+          ./magiskboot unpack -h "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
           ls -lh "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
 
       - name: Upload Output
