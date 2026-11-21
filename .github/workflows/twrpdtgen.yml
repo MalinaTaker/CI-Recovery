@@ -79,10 +79,7 @@ jobs:
           sed -i 's|vendor/omni/config/common.mk|vendor/twrp/config/common.mk|g' twrp_x6532c.mk
           sed -i 's/full_base_telephony.mk/base.mk/g' twrp_x6532c.mk
           sed -i 's/aosp_base.mk/base.mk/g' twrp_x6532c.mk
-
-          if ! grep -q "core_64_bit.mk" twrp_x6532c.mk; then
-            sed -i '1i $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)' twrp_x6532c.mk
-          fi
+          sed -i '/core_64_bit.mk/d' twrp_x6532c.mk
 
           # Hapus variabel usang di twrp-12.1
           awk '/PRODUCT_STATIC_BOOT_CONTROL_HAL/{skip=1} !skip{print} skip && !/\\$/{skip=0}' device.mk > device.mk.tmp && mv device.mk.tmp device.mk
@@ -95,20 +92,20 @@ jobs:
           cp -f "$GITHUB_WORKSPACE/vb_work/dtb" prebuilt/dtb.img 2>/dev/null || true
           cp -f prebuilt/dtb.img prebuilt/mt6765.dtb 2>/dev/null || true
 
-          # Override murni 64-bit (tanpa TARGET_2ND_ARCH agar ramdisk ramping)
+          # Override murni 32-bit (sesuai stock vendor_boot system/lib)
           sed -i '/TARGET_2ND_ARCH/d;/TARGET_2ND_CPU/d' BoardConfig.mk
           cat << 'EOF' >> BoardConfig.mk
 
-          # === Override Murni 64-bit Ramping untuk twrp-12.1 ===
+          # === Override Murni 32-bit untuk Infinix-X6532C ===
           ALLOW_MISSING_DEPENDENCIES := true
           BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
           BUILD_BROKEN_DUP_RULES := true
           TARGET_COPY_OUT_VENDOR := vendor
 
-          TARGET_ARCH := arm64
+          TARGET_ARCH := arm
           TARGET_ARCH_VARIANT := armv8-a
-          TARGET_CPU_ABI := arm64-v8a
-          TARGET_CPU_ABI2 :=
+          TARGET_CPU_ABI := armeabi-v7a
+          TARGET_CPU_ABI2 := armeabi
           TARGET_CPU_VARIANT := cortex-a53
 
           TW_FRAMERATE := 30
@@ -175,28 +172,19 @@ jobs:
             echo "Error: Binary recovery belum terbentuk!"
             exit 1
           fi
-          echo "=== Compile TWRP 64-bit Murni Sukses! ==="
+          echo "=== Compile TWRP 32-bit Murni Sukses! ==="
 
-      - name: Build Multi-Ramdisk Vendor Boot (v4)
+      - name: Inject Pure 32-bit TWRP into Stock Vendor Boot
         run: |
           cd "$GITHUB_WORKSPACE/vb_work"
           OUT_DIR="$GITHUB_WORKSPACE/twrp/out/target/product/Infinix-X6532C"
           TWRP_ROOT="$OUT_DIR/recovery/root"
 
-          # 1. Siapkan fragmen PLATFORM (hanya first_stage_ramdisk dari stock)
-          rm -rf plat_root
-          mkdir -p plat_root
-          if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ]; then
-            cp -a "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" plat_root/
-          fi
-          (cd plat_root && find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/platform.cpio")
-          ./magiskboot compress=lz4_legacy platform.cpio platform.lz4
+          rm -rf pure_root
+          cp -a "$TWRP_ROOT" pure_root
+          cd pure_root
 
-          # 2. Siapkan fragmen RECOVERY (TWRP murni + lib/modules & fstab stock)
-          rm -rf rec_root
-          cp -a "$TWRP_ROOT" rec_root
-          cd rec_root
-
+          # 1. Ambil first_stage_ramdisk dari stock (untuk fstab & boot Android)
           if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ]; then
             rm -rf first_stage_ramdisk
             cp -a "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/first_stage_ramdisk" ./
@@ -205,6 +193,7 @@ jobs:
             cp -f first_stage_ramdisk/fstab* system/etc/ 2>/dev/null || true
           fi
 
+          # 2. Simpan lib/modules 1 kali saja, sisanya symlink
           if [ -d "$GITHUB_WORKSPACE/vb_work/ramdisk_extracted/lib/modules" ]; then
             rm -rf lib/modules vendor/lib/modules
             mkdir -p lib vendor/lib first_stage_ramdisk/lib
@@ -214,61 +203,26 @@ jobs:
             ln -s /lib/modules first_stage_ramdisk/lib/modules
           fi
 
+          # 3. Pastikan symlink /init mengarah ke /system/bin/init
           rm -f init
           ln -sf /system/bin/init init
 
-          # Pangkas file non-esensial agar ramdisk tetap bersih
+          # Pangkas file non-esensial agar ramdisk tetap ramping
           rm -rf system/etc/terminfo
           rm -f system/bin/nano system/bin/bash system/bin/zip
           if [ -d "twres/languages" ]; then
             find twres/languages -type f ! -name "en.xml" -delete
           fi
 
-          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/recovery.cpio"
+          echo "=== Mengemas Ulang CPIO 32-bit (Owner root:root) ==="
+          find . -mindepth 1 | sed 's|^\./||' | sort | cpio -o -H newc -R 0:0 > "$GITHUB_WORKSPACE/vb_work/new_ramdisk.cpio"
+
           cd "$GITHUB_WORKSPACE/vb_work"
-          ./magiskboot compress=lz4_legacy recovery.cpio recovery.lz4
+          CPIO_FILE=$(find . -maxdepth 3 -name "*.cpio" ! -name "new_ramdisk.cpio" | head -n 1)
+          mv -f new_ramdisk.cpio "$CPIO_FILE"
 
-          # 3. Ambil alamat memori (offset) persis dari stock vendor_boot.img & rakit ulang
-          read -r K_ADDR R_ADDR T_ADDR D_ADDR <<< $(python3 -c '
-          import struct
-          with open("vendor_boot.img", "rb") as f:
-              data = f.read(2112)
-          k_addr, r_addr = struct.unpack_from("<II", data, 16)
-          t_addr = struct.unpack_from("<I", data, 2076)[0]
-          d_addr = struct.unpack_from("<Q", data, 2104)[0]
-          print(f"0x{k_addr:08x} 0x{r_addr:08x} 0x{t_addr:08x} 0x{d_addr:08x}")
-          ')
-          echo "=== Offset Stock: kernel=$K_ADDR ramdisk=$R_ADDR tags=$T_ADDR dtb=$D_ADDR ==="
-
-          MKBOOTIMG="$GITHUB_WORKSPACE/twrp/system/tools/mkbootimg/mkbootimg.py"
-          python3 "$MKBOOTIMG" \
-            --header_version 4 \
-            --pagesize 4096 \
-            --base 0x00000000 \
-            --kernel_offset "$K_ADDR" \
-            --ramdisk_offset "$R_ADDR" \
-            --tags_offset "$T_ADDR" \
-            --dtb_offset "$D_ADDR" \
-            --vendor_cmdline "bootopt=64S3,32N2,64N2" \
-            --dtb "$GITHUB_WORKSPACE/vb_work/dtb" \
-            --ramdisk_type platform \
-            --ramdisk_name "" \
-            --vendor_ramdisk_fragment "$GITHUB_WORKSPACE/vb_work/platform.lz4" \
-            --ramdisk_type recovery \
-            --ramdisk_name recovery \
-            --vendor_ramdisk_fragment "$GITHUB_WORKSPACE/vb_work/recovery.lz4" \
-            --vendor_boot "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
-
-            # 4. Tambahkan AVB Hash Footer (VBMETA) dan sesuaikan ukuran ke 64 MB
-          AVBTOOL="$GITHUB_WORKSPACE/twrp/out/host/linux-x86/bin/avbtool"
-          [ ! -f "$AVBTOOL" ] && AVBTOOL="python3 $GITHUB_WORKSPACE/twrp/external/avb/avbtool.py"
-          $AVBTOOL add_hash_footer \
-            --image "$GITHUB_WORKSPACE/vendor_boot-twrp.img" \
-            --partition_size 67108864 \
-            --partition_name vendor_boot
-
-          echo "=== Verifikasi Header Hasil Multi-Ramdisk ==="
-          ./magiskboot unpack -h "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+          echo "=== Repack vendor_boot.img (Single-Ramdisk Stock) ==="
+          ./magiskboot repack vendor_boot.img "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
           ls -lh "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
 
       - name: Upload Output
