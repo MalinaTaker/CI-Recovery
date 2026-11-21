@@ -1,0 +1,33 @@
+name: Inspect X6532 TWRP Vendor Boot
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download & Inspect with Magiskboot
+        run: |
+          sudo apt-get update && sudo apt-get install -y unzip curl cpio file
+          mkdir -p work && cd work
+
+          curl -Lo magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk
+          unzip -q magisk.apk "lib/x86_64/libmagiskboot.so"
+          mv lib/x86_64/libmagiskboot.so ./magiskboot
+          chmod +x ./magiskboot
+          rm -rf magisk.apk lib
+
+          curl -L -o vendor_boot_x6532.img "https://github.com/${{ github.repository }}/releases/download/v1.0/vendor_boot_x6532.img"
+
+          echo "=== 1. MAGISKBOOT UNPACK HEADER ==="
+          ./magiskboot unpack -h vendor_boot_x6532.img
+
+          echo "=== 2. DAFTAR FILE HASIL UNPACK ==="
+          ls -lh
+
+          echo "=== 3. ISI RAMDISK CPIO ==="
+          for f in $(find . -maxdepth 3 -name "*.cpio" | sort); do
+            echo "--- File: $f ($(ls -lh "$f" | awk '{print $5}')) ---"
+            cpio -t < "$f" 2>/dev/null | head -n 40 || ./magiskboot cpio "$f" "ls /"
+          done
