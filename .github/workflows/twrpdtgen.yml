@@ -228,11 +228,27 @@ jobs:
           cd "$GITHUB_WORKSPACE/vb_work"
           ./magiskboot compress=lz4_legacy recovery.cpio recovery.lz4
 
-          # 3. Rakit vendor_boot v4 Multi-Ramdisk menggunakan mkbootimg.py
+          # 3. Ambil alamat memori (offset) persis dari stock vendor_boot.img & rakit ulang
+          read -r K_ADDR R_ADDR T_ADDR D_ADDR <<< $(python3 -c '
+          import struct
+          with open("vendor_boot.img", "rb") as f:
+              data = f.read(2112)
+          k_addr, r_addr = struct.unpack_from("<II", data, 16)
+          t_addr = struct.unpack_from("<I", data, 2076)[0]
+          d_addr = struct.unpack_from("<Q", data, 2104)[0]
+          print(f"0x{k_addr:08x} 0x{r_addr:08x} 0x{t_addr:08x} 0x{d_addr:08x}")
+          ')
+          echo "=== Offset Stock: kernel=$K_ADDR ramdisk=$R_ADDR tags=$T_ADDR dtb=$D_ADDR ==="
+
           MKBOOTIMG="$GITHUB_WORKSPACE/twrp/system/tools/mkbootimg/mkbootimg.py"
           python3 "$MKBOOTIMG" \
             --header_version 4 \
             --pagesize 4096 \
+            --base 0x00000000 \
+            --kernel_offset "$K_ADDR" \
+            --ramdisk_offset "$R_ADDR" \
+            --tags_offset "$T_ADDR" \
+            --dtb_offset "$D_ADDR" \
             --vendor_cmdline "bootopt=64S3,32N2,64N2" \
             --dtb "$GITHUB_WORKSPACE/vb_work/dtb" \
             --ramdisk_type platform \
@@ -242,6 +258,10 @@ jobs:
             --ramdisk_name recovery \
             --vendor_ramdisk_fragment "$GITHUB_WORKSPACE/vb_work/recovery.lz4" \
             --vendor_boot "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+
+          echo "=== Verifikasi Header Hasil Multi-Ramdisk ==="
+          ./magiskboot unpack -h "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
+          ls -lh "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
 
           echo "=== Verifikasi Header Hasil Multi-Ramdisk ==="
           ./magiskboot unpack -h "$GITHUB_WORKSPACE/vendor_boot-twrp.img"
